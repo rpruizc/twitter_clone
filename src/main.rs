@@ -16,6 +16,9 @@ mod response;
 mod schema;
 mod tweet;
 
+pub type DBPool = Pool<ConnectionManager<PgConnection>>;
+pub type DBPooledConnection = PooledConnection<ConnectionManager<PgConnection>>;
+
 #[actix_rt::main]
 async fn main() -> io::Result<()> {
     env::set_var("RUST_LOG", "actix_web=debug, actix_server=info");

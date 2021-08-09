@@ -2,19 +2,18 @@ use actix_web::web::{Data, Json, Path};
 use actix_web::{web, HttpResponse};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use diesel::result::Error;
-use diesel::{ExpressionMethods, Insertable, Queryable, RunQueryDsl, QueryDsl};
+use diesel::{ExpressionMethods, Insertable, Queryable, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::constants::{APPLICATION_JSON, CONNECTION_POOL_ERRROR};
 use crate::like::{list_likes, Like};
 use crate::response::Response;
-use crate::{DBPool, DBPoolConnection};
+use crate::{DBPool, DBPooledConnection};
 
 use super::schema::tweets;
 use diesel::query_dsl::methods::{FilterDsl, LimitDsl, OrderDsl};
 use std::str::FromStr;
-use serde::__private::de::UntaggedUnitVisitor;
 
 pub type Tweets = Response<Tweet>;
 
@@ -141,9 +140,22 @@ fn delete_tweet(_id: Uuid, conn: &DBPooledConnection) -> Result<(), Error> {
 
 /// list 50 last tweets `/tweets`
 #[get("/tweets")]
-pub async fn list() -> HttpResponse {
-    // TODO find the last 50 tweets and return them
-    let tweets = Tweets { results: vec![] };
+pub async fn list(pool: Data<DBPool>) -> HttpResponse {
+    let conn = pool.get().expect(CONNECTION_POOL_ERRROR);
+    let mut tweets = web::block(move || list_tweets(50, &conn))
+        .await
+        .unwrap();
+
+    let tweets_with_likes = Tweets {
+        results: tweets
+            .results
+            .iter_mut()
+            .map(|t| {
+                let _likes = list_likes(Uuid::from_str(t.id.as_str()).unwrap(), &conn).unwrap();
+                t.add_likes(_likes.results)
+            })
+            .collect::<Vec<Tweet>>(),
+    };
 
     HttpResponse::Ok()
         .content_type(APPLICATION_JSON)
@@ -152,23 +164,37 @@ pub async fn list() -> HttpResponse {
 
 /// create a tweet `/tweets`
 #[post("/tweets")]
-pub async fn create(tweet_req: Json<TweetRequest>) -> HttpResponse {
-    HttpResponse::Created()
-        .content_type(APPLICATION_JSON)
-        .json(tweet_req.to_tweet())
+pub async fn create(tweet_req: Json<TweetRequest>, pool: Data<DBPool>) -> HttpResponse {
+    let conn = pool.get().expect(CONNECTION_POOL_ERRROR);
+
+    let tweet = web::block(move || create_tweet(tweet_req.to_tweet().unwrap(), &conn)).await;
+
+    match tweet {
+        Ok(tweet) => HttpResponse::Created()
+            .content_type(APPLICATION_JSON)
+            .json(tweet),
+        _ => HttpResponse::NoContent().await.unwrap(),
+
+    }
 }
 
 /// find a tweet by its id `/tweets/{id}`
 #[get("tweets/{id}")]
-pub async fn get(path: Path<(String,)>) -> HttpResponse {
-    // TODO find a tweet by ID and return it
-    let found_tweet: Option<Tweet> = None;
+pub async fn get(path: Path<(String,)>, pool: Data<DBPool>) -> HttpResponse {
+    let conn = pool.get().expect(CONNECTION_POOL_ERRROR);
+    let tweet =
+        web::block(move || find_tweet(Uuid::from_str(path.0.as_str()).unwrap(), &conn)).await;
 
-    match found_tweet {
-        Some(tweet) => HttpResponse::Ok()
-            .content_type(APPLICATION_JSON)
-            .json(tweet),
-        None => HttpResponse::NoContent()
+    match tweet {
+        Ok(tweet) => {
+            let conn = pool.get().expect(CONNECTION_POOL_ERRROR);
+            let _likes = list_likes(Uuid::from_str(tweet.id.as_str()).unwrap(), &conn).unwrap();
+
+            HttpResponse::Ok()
+                .content_type(APPLICATION_JSON)
+                .json(tweet.add_likes(_likes.results))
+        }
+        _ => HttpResponse::NoContent()
             .content_type(APPLICATION_JSON)
             .await
             .unwrap(),
@@ -177,9 +203,12 @@ pub async fn get(path: Path<(String,)>) -> HttpResponse {
 
 /// delete a tweet by its id `/tweets/{id}`
 #[delete("/tweets/{id}")]
-pub async fn delete(path: Path<(String,)>) -> HttpResponse {
-    // TODO delete tweet by ID
+pub async fn delete(path: Path<(String,)>, pool: Data<DBPool>) -> HttpResponse {
     // in any case return status 204
+    let conn = pool.get().expect(CONNECTION_POOL_ERRROR);
+
+    let _ = web::block(move || delete_tweet(Uuid::from_str(path.0.as_str()).unwrap(), &conn)).await;
+
     HttpResponse::NoContent()
         .content_type(APPLICATION_JSON)
         .await
