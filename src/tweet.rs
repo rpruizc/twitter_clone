@@ -1,12 +1,20 @@
-use actix_web::web::{Json, Path};
-use actix_web::HttpResponse;
-use chrono::{DateTime, Utc};
+use actix_web::web::{Data, Json, Path};
+use actix_web::{web, HttpResponse};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use diesel::result::Error;
+use diesel::{ExpressionMethods, Insertable, Queryable, RunQueryDsl, QueryDsl};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::constants::APPLICATION_JSON;
-use crate::like::Like;
+use crate::constants::{APPLICATION_JSON, CONNECTION_POOL_ERRROR};
+use crate::like::{list_likes, Like};
 use crate::response::Response;
+use crate::{DBPool, DBPoolConnection};
+
+use super::schema::tweets;
+use diesel::query_dsl::methods::{FilterDsl, LimitDsl, OrderDsl};
+use std::str::FromStr;
+use serde::__private::de::UntaggedUnitVisitor;
 
 pub type Tweets = Response<Tweet>;
 
@@ -27,6 +35,42 @@ impl Tweet {
             likes: vec![],
         }
     }
+
+    pub fn to_tweet_db(&self) -> TweetDB {
+        TweetDB {
+            id: Uuid::new_v4(),
+            created_at: Utc::now().naive_utc(),
+            message: self.message.clone(),
+        }
+    }
+
+    pub fn add_likes(&self, likes: Vec<Like>) -> Self {
+        Self {
+            id: self.id.clone(),
+            created_at: self.created_at.clone(),
+            message: self.message.clone(),
+            likes,
+        }
+    }
+}
+
+#[table_name = "tweets"]
+#[derive(Queryable, Insertable)]
+pub struct TweetDB {
+    pub id: Uuid,
+    pub created_at: NaiveDateTime,
+    pub message: String,
+}
+
+impl TweetDB {
+    fn to_tweet(&self) -> Tweet {
+        Tweet {
+            id: self.id.to_string(),
+            created_at: Utc.from_utc_datetime(&self.created_at),
+            message: self.message.clone(),
+            likes: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -40,6 +84,58 @@ impl TweetRequest {
             Some(message) => Some(Tweet::new(message.to_string())),
             None => None,
         }
+    }
+}
+
+fn list_tweets(total_tweets: i64, conn: &DBPooledConnection) -> Result<Tweets, Error> {
+    use crate::schema::tweets::dsl::*;
+
+    let _tweets = match tweets
+        .order(created_at.desc())
+        .limit(total_tweets)
+        .load::<TweetDB>(conn)
+    {
+        Ok(tws) => tws,
+        Err(_) => vec![],
+    };
+
+    Ok(Tweets {
+        results: _tweets
+            .into_iter()
+            .map(|t| t.to_tweet())
+            .collect::<Vec<Tweet>>(),
+    })
+}
+
+fn find_tweet(_id: Uuid, conn: &DBPooledConnection) -> Result<Tweet, Error> {
+    use crate::schema::tweets::dsl::*;
+
+    let res = tweets.filter(id.eq(_id)).load::<TweetDB>(conn);
+    match res {
+        Ok(tweets_db) => match tweets_db.first() {
+            Some(tweet_db) => Ok(tweet_db.to_tweet()),
+            _ => Err(Error::NotFound),
+        },
+        Err(err) => Err(err),
+    }
+}
+
+fn create_tweet(tweet: Tweet, conn: &DBPooledConnection) -> Result<Tweet, Error> {
+    use crate::schema::tweets::dsl::*;
+
+    let tweet_db = tweet.to_tweet_db();
+    let _ = diesel::insert_into(tweets).values(&tweet_db).execute(conn);
+
+    Ok(tweet_db.to_tweet())
+}
+
+fn delete_tweet(_id: Uuid, conn: &DBPooledConnection) -> Result<(), Error> {
+    use crate::schema::tweets::dsl::*;
+
+    let res = diesel::delete(tweets.filter(id.eq(_id))).execute(conn);
+    match res {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
